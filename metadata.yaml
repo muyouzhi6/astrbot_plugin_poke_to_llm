@@ -1,5 +1,5 @@
-name: astrbot_plugin_llm_poke # 这是你的插件的唯一识别名。
-desc: 用LLM进行回复的戳一戳插件# 插件简短描述
-version: v1.4 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: 和泉智宏 # 作者
-repo: https://github.com/0d00-Ciallo-0721/astrbot_plugin_llm_poke # 插件的仓库地址
+name: astrbot_plugin_poke_to_llm
+desc: 忘@了戳一下吧 - 戳一戳触发 LLM 回复，让 Bot 根据上下文自然响应
+version: 2.2.0
+author: 木有知
+repo: https://github.com/muyouzhi6/astrbot_plugin_poke_to_llm

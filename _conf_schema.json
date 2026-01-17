@@ -1,0 +1,49 @@
+{
+  "enable": {
+    "description": "启用戳一戳触发 LLM",
+    "type": "bool",
+    "default": true
+  },
+  "enable_in_groups": {
+    "description": "在群聊中启用",
+    "type": "bool",
+    "hint": "开启后，机器人将响应群聊中的戳一戳",
+    "default": true
+  },
+  "enabled_groups": {
+    "description": "启用的群列表（留空=全部群启用）",
+    "type": "list",
+    "hint": "填入群号，只有这些群的戳一戳会触发。留空表示所有群都启用",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "enable_in_private": {
+    "description": "在私聊中启用",
+    "type": "bool",
+    "hint": "开启后，机器人将响应私聊中的戳一戳",
+    "default": true
+  },
+  "cooldown": {
+    "description": "冷却时间（秒）",
+    "type": "float",
+    "hint": "同一用户连续戳一戳的最小间隔时间，防止刷屏",
+    "default": 5.0
+  },
+  "blacklisted_users": {
+    "description": "用户黑名单",
+    "type": "list",
+    "hint": "填入 QQ 号，这些用户的戳一戳不会触发响应",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "poke_prompt": {
+    "description": "戳一戳提示词模板",
+    "type": "string",
+    "hint": "发送给 LLM 的提示词，{username} 会被替换为用户名",
+    "default": "{username}戳了戳你。\n\n可能的情况：\n- 刚才说话忘了@你，希望你回应之前的内容\n- 想和你聊天\n- 希望你参与当前话题或回答问题\n- 对你之前说的话有反应\n- 只是单纯戳你玩\n\n请根据最近的对话上下文，判断用户意图并自然回应。如果上下文没有明确话题，可以俏皮地回应这个戳一戳。"
+  }
+}

@@ -30,9 +30,9 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from astrbot import logger
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 
 if TYPE_CHECKING:
     from astrbot.core.config import AstrBotConfig
@@ -50,13 +50,6 @@ DEFAULT_POKE_PROMPT = """{username}戳了戳你。
 请根据最近的对话上下文，判断用户意图并自然回应。如果上下文没有明确话题，可以俏皮地回应这个戳一戳。"""
 
 
-@register(
-    "astrbot_plugin_poke_to_llm",
-    "木有知",
-    "忘@了戳一下吧 - 戳一戳触发 LLM 回复",
-    "2.1.0",
-    "https://github.com/muyouzhi6/astrbot_plugin_poke_to_llm",
-)
 class PokeToLLM(Star):
     """
     戳一戳触发 LLM 插件

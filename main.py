@@ -1,5 +1,5 @@
 """
-AstrBot 戳一戳触发 LLM 插件 v1.1.0
+AstrBot 戳一戳触发 LLM 插件 v1.2.0
 
 在群聊中戳一戳 Bot，触发 LLM 响应。
 
@@ -12,19 +12,19 @@ AstrBot 戳一戳触发 LLM 插件 v1.1.0
 
 设计原则：
 - 通过 yield event.request_llm() 走标准 LLM 链路
-- 支持 context_aware 插件（需配置启用）
+- 支持 context_aware 插件（获取群聊完整上下文）
 - 支持框架自带的对话上下文
 - 对话会记入上下文历史
 - 轻量高效，可持久运行
 
 Author: 木有知
-Version: 1.1.0
+Version: 1.2.0
 """
 
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from astrbot import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -50,7 +50,7 @@ DEFAULT_POKE_PROMPT = """{username}戳了戳你。
     "astrbot_plugin_poke_to_llm",
     "木有知",
     "忘@了戳一下吧 - 戳一戳触发 LLM 回复",
-    "1.1.0",
+    "1.2.0",
     "https://github.com/muyouzhi6/astrbot_plugin_poke_to_llm",
 )
 class PokeToLLM(Star):
@@ -79,6 +79,7 @@ class PokeToLLM(Star):
 
         # context_aware 模式
         self._use_context_aware = bool(self._cfg("use_context_aware", False))
+        self._context_aware_count = int(self._cfg("context_aware_count", 10) or 10)
 
         # 白名单和黑名单
         self._enabled_groups: set[str] = set()
@@ -97,14 +98,37 @@ class PokeToLLM(Star):
         # 统计
         self._poke_count = 0
 
+        # context_aware 插件实例缓存
+        self._context_aware_plugin: Any = None
+        self._context_aware_checked = False
+
         mode = "context_aware" if self._use_context_aware else "框架对话历史"
-        logger.info(f"[PokeToLLM] 插件 v1.1.0 已加载 | 上下文模式: {mode}")
+        logger.info(f"[PokeToLLM] 插件 v1.2.0 已加载 | 上下文模式: {mode}")
 
     def _cfg(self, key: str, default=None):
         """获取配置项"""
         if self._config is None:
             return default
         return self._config.get(key, default)
+
+    def _get_context_aware_plugin(self) -> Any:
+        """获取 context_aware 插件实例"""
+        if self._context_aware_checked:
+            return self._context_aware_plugin
+
+        self._context_aware_checked = True
+
+        # 查找 context_aware 插件
+        star_meta = self.context.get_registered_star("astrbot_plugin_context_aware")
+        if star_meta and star_meta.star_cls:
+            self._context_aware_plugin = star_meta.star_cls
+            logger.info("[PokeToLLM] 已找到 context_aware 插件")
+        else:
+            logger.warning(
+                "[PokeToLLM] 未找到 context_aware 插件，将使用框架对话历史"
+            )
+
+        return self._context_aware_plugin
 
     def _check_cooldown(self, user_id: str) -> bool:
         """检查冷却时间，返回 True 表示可以响应"""
@@ -196,28 +220,58 @@ class PokeToLLM(Star):
         # 构造提示词
         prompt = self._poke_prompt.format(username=username)
 
+        # 获取对话历史上下文
+        context_text = ""
+        if self._use_context_aware:
+            context_text = self._get_context_aware_context(event)
+
+        # 如果有群聊上下文，添加到提示词
+        if context_text:
+            prompt = f"{context_text}\n\n{prompt}"
+
         logger.info(
             f"[PokeToLLM] #{self._poke_count} | "
             f"用户: {username}({sender_id}) | "
-            f"群: {group_id or '私聊'}"
+            f"群: {group_id or '私聊'} | "
+            f"上下文: {'context_aware' if context_text else '框架历史'}"
         )
 
-        if self._use_context_aware:
-            # context_aware 模式：
-            # 设置标记让 context_aware 知道这是戳一戳触发
-            # 不传 conversation，让框架自动处理
-            # context_aware 的 on_llm_request 会注入群聊上下文
-            event.set_extra("_poke_trigger", True)
-            event.set_extra("_poke_username", username)
-            
-            # 获取 conversation 用于记录对话历史
-            conversation = await self._get_conversation(event)
-            yield event.request_llm(prompt=prompt, conversation=conversation)
-        else:
-            # 框架对话历史模式：
-            # 使用框架自带的 conversation 历史
-            conversation = await self._get_conversation(event)
-            yield event.request_llm(prompt=prompt, conversation=conversation)
+        # 获取 conversation 用于记录对话历史
+        conversation = await self._get_conversation(event)
+
+        # 通过标准 LLM 链路请求
+        yield event.request_llm(prompt=prompt, conversation=conversation)
+
+    def _get_context_aware_context(self, event: AstrMessageEvent) -> str:
+        """从 context_aware 插件获取群聊上下文"""
+        plugin = self._get_context_aware_plugin()
+        if not plugin:
+            return ""
+
+        try:
+            # 调用 context_aware 的公共 API
+            if hasattr(plugin, "get_formatted_context"):
+                context = plugin.get_formatted_context(
+                    event.unified_msg_origin,
+                    self._context_aware_count,
+                )
+                if context:
+                    return context
+            elif hasattr(plugin, "get_recent_messages"):
+                messages = plugin.get_recent_messages(
+                    event.unified_msg_origin,
+                    self._context_aware_count,
+                )
+                if messages:
+                    lines = ["[最近的群聊消息]"]
+                    for msg in messages:
+                        name = "[Bot]" if msg.get("is_bot") else msg.get("sender_name", "未知")
+                        lines.append(f"{name}: {msg.get('content', '')}")
+                    return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"[PokeToLLM] 获取 context_aware 上下文失败: {e}")
+
+        return ""
 
     async def _get_conversation(self, event: AstrMessageEvent):
         """获取当前会话的 conversation 对象"""

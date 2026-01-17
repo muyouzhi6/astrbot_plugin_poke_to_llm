@@ -7,8 +7,17 @@
   "use_context_aware": {
     "description": "使用 context_aware 插件的群聊上下文",
     "type": "bool",
-    "hint": "如果安装了 astrbot_plugin_context_aware 插件，建议开启此选项以获取更完整的群聊上下文（包括未@Bot的消息）",
+    "hint": "如果安装了 astrbot_plugin_context_aware 插件，开启此选项可获取群里所有人的消息作为上下文（包括未@Bot的消息）",
     "default": false
+  },
+  "context_aware_count": {
+    "description": "获取的群聊消息数量",
+    "type": "int",
+    "hint": "从 context_aware 获取最近多少条群聊消息作为上下文",
+    "default": 10,
+    "condition": {
+      "use_context_aware": true
+    }
   },
   "enable_in_groups": {
     "description": "在群聊中启用",

@@ -30,13 +30,15 @@
 - 上下文包含：用户 @Bot 的消息 + Bot 的回复
 - 适合：未安装 context_aware 插件的用户
 
-### 模式二：context_aware 群聊上下文
+### 模式二：context_aware 群聊上下文（推荐）
 
 - 配合 `astrbot_plugin_context_aware` 插件使用
-- 上下文包含：群里所有人的消息（不仅仅是 @Bot 的）
-- 适合：已安装 context_aware 插件，希望 Bot 了解更完整群聊上下文的用户
+- 上下文包含：**群里所有人的消息**（不仅仅是 @Bot 的）
+- 适合：已安装 context_aware 插件的用户
 
-**启用方式**：在插件配置中开启 `use_context_aware` 选项
+**启用方式**：
+1. 安装 `astrbot_plugin_context_aware` 插件
+2. 在本插件配置中开启 `use_context_aware` 选项
 
 ---
 
@@ -46,6 +48,7 @@
 |------|------|--------|
 | `enable` | 启用插件 | `true` |
 | `use_context_aware` | 使用 context_aware 插件的群聊上下文 | `false` |
+| `context_aware_count` | 获取的群聊消息数量 | `10` |
 | `enable_in_groups` | 群聊中启用 | `true` |
 | `enabled_groups` | 启用的群列表（留空=全部） | `[]` |
 | `enable_in_private` | 私聊中启用 | `true` |
@@ -78,3 +81,4 @@
 - 冷却时间防止同一用户频繁触发
 - 对话会正常记入对话历史
 - 如果同时安装了 `astrbot_plugin_llm_poke`，建议禁用其一，避免重复响应
+- 使用 context_aware 模式需要先安装 `astrbot_plugin_context_aware` 插件

@@ -1,5 +1,5 @@
 """
-AstrBot 戳一戳触发 LLM 插件 v2.1.0
+AstrBot 戳一戳触发 LLM 插件
 
 在群聊中戳一戳 Bot，触发 LLM 响应。
 
@@ -17,27 +17,26 @@ AstrBot 戳一戳触发 LLM 插件 v2.1.0
 - 对话会记入上下文历史
 - 轻量高效，可持久运行
 
-v2.1.0 更新：
-- 设置 _poke_trigger 标记，让 context_aware 识别戳一戳触发
-- 传递戳一戳用户信息，优化场景描述生成
-
 Author: 木有知
-Version: 2.1.0
 """
 
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
 if TYPE_CHECKING:
+    from astrbot.core.db.po import Conversation
     from astrbot.core.config import AstrBotConfig
 
+# 版本号常量
+VERSION = "2.2.0"
 
+# 默认提示词
 DEFAULT_POKE_PROMPT = """{username}戳了戳你。
 
 可能的情况：
@@ -48,6 +47,11 @@ DEFAULT_POKE_PROMPT = """{username}戳了戳你。
 - 只是单纯戳你玩
 
 请根据最近的对话上下文，判断用户意图并自然回应。如果上下文没有明确话题，可以俏皮地回应这个戳一戳。"""
+
+# 冷却清理间隔（秒）
+COOLDOWN_EXPIRE_SECONDS = 600
+# 每多少次触发一次冷却清理
+CLEANUP_INTERVAL = 50
 
 
 class PokeToLLM(Star):
@@ -70,20 +74,27 @@ class PokeToLLM(Star):
         self._enabled = bool(self._cfg("enable", True))
         self._enable_in_groups = bool(self._cfg("enable_in_groups", True))
         self._enable_in_private = bool(self._cfg("enable_in_private", True))
+
+        # 冷却时间配置，安全转换
         cooldown_val = self._cfg("cooldown", 5.0)
-        self._cooldown = float(cooldown_val) if cooldown_val is not None else 5.0
+        try:
+            self._cooldown = float(cooldown_val) if cooldown_val is not None else 5.0
+        except (ValueError, TypeError):
+            logger.warning(f"[PokeToLLM] cooldown 配置值无效: {cooldown_val}，使用默认值 5.0")
+            self._cooldown = 5.0
+
         self._poke_prompt = str(self._cfg("poke_prompt", DEFAULT_POKE_PROMPT))
 
-        # 白名单和黑名单
-        self._enabled_groups: set[str] = set()
+        # 白名单和黑名单（使用 frozenset 提高查找效率，不可变）
         enabled_groups_raw = self._cfg("enabled_groups", [])
-        if isinstance(enabled_groups_raw, list):
-            self._enabled_groups = {str(g) for g in enabled_groups_raw if g}
+        self._enabled_groups: frozenset[str] = frozenset(
+            str(g) for g in (enabled_groups_raw if isinstance(enabled_groups_raw, list) else []) if g
+        )
 
-        self._blacklisted_users: set[str] = set()
         blacklisted_raw = self._cfg("blacklisted_users", [])
-        if isinstance(blacklisted_raw, list):
-            self._blacklisted_users = {str(u) for u in blacklisted_raw if u}
+        self._blacklisted_users: frozenset[str] = frozenset(
+            str(u) for u in (blacklisted_raw if isinstance(blacklisted_raw, list) else []) if u
+        )
 
         # 冷却记录: user_id -> last_poke_time
         self._cooldown_map: dict[str, float] = {}
@@ -91,9 +102,9 @@ class PokeToLLM(Star):
         # 统计
         self._poke_count = 0
 
-        logger.info("[PokeToLLM] 插件 v2.1.0 已加载")
+        logger.info(f"[PokeToLLM] 插件 v{VERSION} 已加载")
 
-    def _cfg(self, key: str, default=None):
+    def _cfg(self, key: str, default: Any = None) -> Any:
         """获取配置项"""
         if self._config is None:
             return default
@@ -102,47 +113,59 @@ class PokeToLLM(Star):
     def _check_cooldown(self, user_id: str) -> bool:
         """检查冷却时间，返回 True 表示可以响应"""
         now = time.time()
-        last_time = self._cooldown_map.get(user_id, 0)
+        last_time = self._cooldown_map.get(user_id, 0.0)
         if now - last_time < self._cooldown:
             return False
         self._cooldown_map[user_id] = now
         return True
 
     def _cleanup_cooldown(self) -> None:
-        """清理过期的冷却记录（超过 10 分钟）"""
+        """清理过期的冷却记录"""
         now = time.time()
-        expired = [
-            uid for uid, ts in self._cooldown_map.items()
-            if now - ts > 600
-        ]
+        # 使用列表推导避免在迭代时修改字典
+        expired = [uid for uid, ts in self._cooldown_map.items() if now - ts > COOLDOWN_EXPIRE_SECONDS]
         for uid in expired:
             del self._cooldown_map[uid]
+
+    def _is_poke_event(self, raw_message: dict[str, Any]) -> bool:
+        """检查是否为戳一戳事件"""
+        return (
+            raw_message.get("post_type") == "notice"
+            and raw_message.get("notice_type") == "notify"
+            and raw_message.get("sub_type") == "poke"
+        )
+
+    def _format_prompt(self, username: str) -> str:
+        """格式化提示词，处理可能的 KeyError"""
+        try:
+            return self._poke_prompt.format(username=username)
+        except KeyError as e:
+            logger.warning(f"[PokeToLLM] 提示词格式化失败，缺少变量: {e}")
+            return f"{username}戳了戳你，请根据上下文回应。"
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_poke(self, event: AstrMessageEvent):
         """监听并响应戳一戳事件"""
-        # 插件未启用
+        # ===== 早期返回：最便宜的检查放最前 =====
+
+        # 1. 插件未启用（纯内存检查，最快）
         if not self._enabled:
             return
 
-        # 仅处理 aiocqhttp 平台
+        # 2. 平台检查（字符串比较，很快）
         if event.get_platform_name() != "aiocqhttp":
             return
 
-        # 获取原始消息
+        # 3. 获取原始消息
         raw_message = getattr(event.message_obj, "raw_message", None)
-        if not raw_message:
+        if not raw_message or not isinstance(raw_message, dict):
             return
 
-        # 检查是否为戳一戳事件
-        if (
-            raw_message.get("post_type") != "notice"
-            or raw_message.get("notice_type") != "notify"
-            or raw_message.get("sub_type") != "poke"
-        ):
+        # 4. 检查是否为戳一戳事件
+        if not self._is_poke_event(raw_message):
             return
 
-        # 提取事件信息
+        # ===== 提取事件信息 =====
         bot_id = raw_message.get("self_id")
         sender_id = raw_message.get("user_id")
         target_id = raw_message.get("target_id")
@@ -154,40 +177,41 @@ class PokeToLLM(Star):
         if str(target_id) != str(bot_id):
             return
 
+        sender_id_str = str(sender_id)
+
+        # ===== 权限和作用域检查 =====
+
         # 黑名单检查
-        if str(sender_id) in self._blacklisted_users:
+        if sender_id_str in self._blacklisted_users:
             logger.debug(f"[PokeToLLM] 用户 {sender_id} 在黑名单中，忽略")
             return
 
         # 作用域检查
         if group_id:
-            # 群聊
             if not self._enable_in_groups:
                 return
-            # 白名单检查（空白名单=全部启用）
             if self._enabled_groups and str(group_id) not in self._enabled_groups:
                 return
-        else:
-            # 私聊
-            if not self._enable_in_private:
-                return
+        elif not self._enable_in_private:
+            return
 
         # 冷却检查
-        if not self._check_cooldown(str(sender_id)):
+        if not self._check_cooldown(sender_id_str):
             logger.debug(f"[PokeToLLM] 用户 {sender_id} 冷却中，忽略")
             return
 
+        # ===== 通过所有检查，处理戳一戳 =====
         self._poke_count += 1
 
-        # 定期清理冷却记录（每 50 次）
-        if self._poke_count % 50 == 0:
+        # 定期清理冷却记录
+        if self._poke_count % CLEANUP_INTERVAL == 0:
             self._cleanup_cooldown()
 
         # 获取用户名
-        username = event.get_sender_name() or str(sender_id)
+        username = event.get_sender_name() or sender_id_str
 
         # 构造提示词
-        prompt = self._poke_prompt.format(username=username)
+        prompt = self._format_prompt(username)
 
         logger.info(
             f"[PokeToLLM] #{self._poke_count} | "
@@ -201,41 +225,34 @@ class PokeToLLM(Star):
             logger.warning("[PokeToLLM] 无法获取 conversation，对话可能不会被记录")
 
         # 设置戳一戳触发标记，让 context_aware 插件识别
-        # 这样 context_aware 可以生成正确的场景描述
         event.set_extra("_poke_trigger", True)
-        event.set_extra("_poke_sender_id", str(sender_id))
+        event.set_extra("_poke_sender_id", sender_id_str)
         event.set_extra("_poke_sender_name", username)
 
         # 通过标准 LLM 链路请求
-        # 注意：如果安装了 context_aware 插件，它的 on_llm_request 钩子会自动注入群聊上下文
         yield event.request_llm(prompt=prompt, conversation=conversation)
 
-    async def _get_conversation(self, event: AstrMessageEvent):
+    async def _get_conversation(self, event: AstrMessageEvent) -> Conversation | None:
         """获取当前会话的 conversation 对象"""
         umo = event.unified_msg_origin
         conv_mgr = self.context.conversation_manager
 
         try:
-            # 获取当前对话 ID
+            # 获取或创建对话 ID
             cid = await conv_mgr.get_curr_conversation_id(umo)
             if not cid:
-                # 如果没有对话，创建一个新的
                 cid = await conv_mgr.new_conversation(umo, event.get_platform_id())
 
             # 获取对话对象
-            conversation = await conv_mgr.get_conversation(umo, cid)
-            if not conversation:
-                # 如果获取失败，再次尝试创建
-                cid = await conv_mgr.new_conversation(umo, event.get_platform_id())
-                conversation = await conv_mgr.get_conversation(umo, cid)
-
-            return conversation
-        except Exception as e:
-            logger.error(f"[PokeToLLM] 获取 conversation 失败: {e}")
+            return await conv_mgr.get_conversation(umo, cid)
+        except Exception:
+            logger.exception("[PokeToLLM] 获取 conversation 失败")
             return None
 
     async def terminate(self) -> None:
         """清理资源"""
         logger.info(
-            f"[PokeToLLM] 插件已终止 | 共响应 {self._poke_count} 次戳一戳"
+            f"[PokeToLLM] 插件已终止 | "
+            f"共响应 {self._poke_count} 次戳一戳 | "
+            f"冷却记录: {len(self._cooldown_map)} 条"
         )

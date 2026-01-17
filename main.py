@@ -1,5 +1,5 @@
 """
-AstrBot 戳一戳触发 LLM 插件 v1.0.0
+AstrBot 戳一戳触发 LLM 插件 v1.1.0
 
 在群聊中戳一戳 Bot，触发 LLM 响应。
 
@@ -12,13 +12,13 @@ AstrBot 戳一戳触发 LLM 插件 v1.0.0
 
 设计原则：
 - 通过 yield event.request_llm() 走标准 LLM 链路
-- 自动兼容 context_aware 插件（如已安装）
-- 自动兼容框架自带的对话上下文
+- 支持 context_aware 插件（需配置启用）
+- 支持框架自带的对话上下文
 - 对话会记入上下文历史
 - 轻量高效，可持久运行
 
 Author: 木有知
-Version: 1.0.0
+Version: 1.1.0
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ DEFAULT_POKE_PROMPT = """{username}戳了戳你。
     "astrbot_plugin_poke_to_llm",
     "木有知",
     "忘@了戳一下吧 - 戳一戳触发 LLM 回复",
-    "1.0.0",
+    "1.1.0",
     "https://github.com/muyouzhi6/astrbot_plugin_poke_to_llm",
 )
 class PokeToLLM(Star):
@@ -58,7 +58,7 @@ class PokeToLLM(Star):
     戳一戳触发 LLM 插件
 
     监听戳一戳事件，通过标准 LLM 链路生成回复。
-    自动兼容 context_aware 插件和框架自带上下文。
+    支持 context_aware 插件和框架自带上下文两种模式。
     """
 
     def __init__(
@@ -77,6 +77,9 @@ class PokeToLLM(Star):
         self._cooldown = float(cooldown_val) if cooldown_val is not None else 5.0
         self._poke_prompt = str(self._cfg("poke_prompt", DEFAULT_POKE_PROMPT))
 
+        # context_aware 模式
+        self._use_context_aware = bool(self._cfg("use_context_aware", False))
+
         # 白名单和黑名单
         self._enabled_groups: set[str] = set()
         enabled_groups_raw = self._cfg("enabled_groups", [])
@@ -94,7 +97,8 @@ class PokeToLLM(Star):
         # 统计
         self._poke_count = 0
 
-        logger.info("[PokeToLLM] 插件 v1.0.0 已加载")
+        mode = "context_aware" if self._use_context_aware else "框架对话历史"
+        logger.info(f"[PokeToLLM] 插件 v1.1.0 已加载 | 上下文模式: {mode}")
 
     def _cfg(self, key: str, default=None):
         """获取配置项"""
@@ -198,15 +202,22 @@ class PokeToLLM(Star):
             f"群: {group_id or '私聊'}"
         )
 
-        # 获取当前会话的 conversation，确保对话记入上下文历史
-        conversation = await self._get_conversation(event)
-
-        # 通过标准 LLM 链路请求
-        # 传入 conversation 确保：
-        # 1. 加载历史上下文
-        # 2. 本次对话记入历史
-        # 3. context_aware 插件（如已安装）会注入额外上下文
-        yield event.request_llm(prompt=prompt, conversation=conversation)
+        if self._use_context_aware:
+            # context_aware 模式：
+            # 设置标记让 context_aware 知道这是戳一戳触发
+            # 不传 conversation，让框架自动处理
+            # context_aware 的 on_llm_request 会注入群聊上下文
+            event.set_extra("_poke_trigger", True)
+            event.set_extra("_poke_username", username)
+            
+            # 获取 conversation 用于记录对话历史
+            conversation = await self._get_conversation(event)
+            yield event.request_llm(prompt=prompt, conversation=conversation)
+        else:
+            # 框架对话历史模式：
+            # 使用框架自带的 conversation 历史
+            conversation = await self._get_conversation(event)
+            yield event.request_llm(prompt=prompt, conversation=conversation)
 
     async def _get_conversation(self, event: AstrMessageEvent):
         """获取当前会话的 conversation 对象"""

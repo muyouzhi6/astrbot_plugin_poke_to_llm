@@ -20,13 +20,23 @@
 
 ---
 
-## 特性
+## 上下文模式
 
-- **对话记入上下文**：戳一戳触发的对话会正常记入对话历史
-- **兼容 context_aware 插件**：如已安装，自动使用其维护的群聊上下文
-- **兼容框架自带上下文**：无 context_aware 时使用框架默认对话上下文
+插件支持两种上下文获取模式：
 
-无需额外配置，开箱即用。
+### 模式一：框架对话历史（默认）
+
+- 使用 AstrBot 框架自带的对话历史
+- 上下文包含：用户 @Bot 的消息 + Bot 的回复
+- 适合：未安装 context_aware 插件的用户
+
+### 模式二：context_aware 群聊上下文
+
+- 配合 `astrbot_plugin_context_aware` 插件使用
+- 上下文包含：群里所有人的消息（不仅仅是 @Bot 的）
+- 适合：已安装 context_aware 插件，希望 Bot 了解更完整群聊上下文的用户
+
+**启用方式**：在插件配置中开启 `use_context_aware` 选项
 
 ---
 
@@ -35,6 +45,7 @@
 | 配置 | 说明 | 默认值 |
 |------|------|--------|
 | `enable` | 启用插件 | `true` |
+| `use_context_aware` | 使用 context_aware 插件的群聊上下文 | `false` |
 | `enable_in_groups` | 群聊中启用 | `true` |
 | `enabled_groups` | 启用的群列表（留空=全部） | `[]` |
 | `enable_in_private` | 私聊中启用 | `true` |
@@ -65,4 +76,5 @@
 
 - 仅支持 aiocqhttp 平台（NapCat / go-cqhttp）
 - 冷却时间防止同一用户频繁触发
+- 对话会正常记入对话历史
 - 如果同时安装了 `astrbot_plugin_llm_poke`，建议禁用其一，避免重复响应

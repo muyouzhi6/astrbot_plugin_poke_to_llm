@@ -4,6 +4,12 @@
     "type": "bool",
     "default": true
   },
+  "use_context_aware": {
+    "description": "使用 context_aware 插件的群聊上下文",
+    "type": "bool",
+    "hint": "如果安装了 astrbot_plugin_context_aware 插件，建议开启此选项以获取更完整的群聊上下文（包括未@Bot的消息）",
+    "default": false
+  },
   "enable_in_groups": {
     "description": "在群聊中启用",
     "type": "bool",

@@ -1,5 +1,5 @@
 name: astrbot_plugin_poke_to_llm
 desc: 忘@了戳一下吧 - 戳一戳触发 LLM 回复，让 Bot 根据上下文自然响应
-version: v1.0.0
+version: v1.1.0
 author: 木有知
 repo: https://github.com/muyouzhi6/astrbot_plugin_poke_to_llm

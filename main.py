@@ -23,6 +23,7 @@ Author: 木有知
 from __future__ import annotations
 
 import time
+from string import Template
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
@@ -30,14 +31,14 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
 if TYPE_CHECKING:
-    from astrbot.core.db.po import Conversation
     from astrbot.core.config import AstrBotConfig
+    from astrbot.core.db.po import Conversation
 
 # 版本号常量
 VERSION = "2.2.0"
 
-# 默认提示词
-DEFAULT_POKE_PROMPT = """{username}戳了戳你。
+# 默认提示词（使用 $variable 语法，支持 safe_substitute）
+DEFAULT_POKE_PROMPT = """$username 戳了戳你。
 
 可能的情况：
 - 刚才说话忘了@你，希望你回应之前的内容
@@ -136,12 +137,16 @@ class PokeToLLM(Star):
         )
 
     def _format_prompt(self, username: str) -> str:
-        """格式化提示词，处理可能的 KeyError"""
-        try:
-            return self._poke_prompt.format(username=username)
-        except KeyError as e:
-            logger.warning(f"[PokeToLLM] 提示词格式化失败，缺少变量: {e}")
-            return f"{username}戳了戳你，请根据上下文回应。"
+        """格式化提示词，使用 safe_substitute 容错处理未知占位符"""
+        template = Template(self._poke_prompt)
+        return template.safe_substitute(username=username)
+
+    def _format_prompt_with_context(self, username: str, group_id: str | None) -> str:
+        """当 conversation 获取失败时，生成包含额外上下文的降级提示词"""
+        context_type = "群聊" if group_id else "私聊"
+        base_prompt = self._format_prompt(username)
+        fallback_note = f"\n\n[注意：当前为{context_type}场景，无法获取历史上下文，请基于这条戳一戳事件本身进行回应]"
+        return base_prompt + fallback_note
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_poke(self, event: AstrMessageEvent):
@@ -166,10 +171,12 @@ class PokeToLLM(Star):
             return
 
         # ===== 提取事件信息 =====
-        bot_id = raw_message.get("self_id")
-        sender_id = raw_message.get("user_id")
-        target_id = raw_message.get("target_id")
-        group_id = raw_message.get("group_id")
+        # 戳一戳是 notice 事件，优先使用框架 API，fallback 到 raw_message
+        # target_id 是戳一戳特有字段，必须从 raw_message 获取
+        bot_id = event.get_self_id() or raw_message.get("self_id")
+        sender_id = event.get_sender_id() or raw_message.get("user_id")
+        target_id = raw_message.get("target_id")  # 戳一戳特有字段
+        group_id = event.get_group_id() or raw_message.get("group_id")
 
         # 必须是戳机器人
         if not bot_id or not sender_id or not target_id:
@@ -210,9 +217,6 @@ class PokeToLLM(Star):
         # 获取用户名
         username = event.get_sender_name() or sender_id_str
 
-        # 构造提示词
-        prompt = self._format_prompt(username)
-
         logger.info(
             f"[PokeToLLM] #{self._poke_count} | "
             f"用户: {username}({sender_id}) | "
@@ -222,7 +226,11 @@ class PokeToLLM(Star):
         # 获取 conversation 用于记录对话历史
         conversation = await self._get_conversation(event)
         if not conversation:
-            logger.warning("[PokeToLLM] 无法获取 conversation，对话可能不会被记录")
+            logger.warning("[PokeToLLM] 无法获取 conversation，将以无上下文模式响应")
+            # 降级策略：在 prompt 中补充额外上下文信息
+            prompt = self._format_prompt_with_context(username, group_id)
+        else:
+            prompt = self._format_prompt(username)
 
         # 设置戳一戳触发标记，让 context_aware 插件识别
         event.set_extra("_poke_trigger", True)

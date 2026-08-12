@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Reply
 from astrbot.api.star import Context, Star
 
 if TYPE_CHECKING:
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
     from astrbot.core.db.po import Conversation
 
 # 版本号常量
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 
 # 默认提示词（使用 $variable 语法，支持 safe_substitute）
 DEFAULT_POKE_PROMPT = """$username 戳了戳你。
@@ -85,7 +86,9 @@ class PokeToLLM(Star):
         try:
             self._cooldown = float(cooldown_val) if cooldown_val is not None else 5.0
         except (ValueError, TypeError):
-            logger.warning(f"[PokeToLLM] cooldown 配置值无效: {cooldown_val}，使用默认值 5.0")
+            logger.warning(
+                f"[PokeToLLM] cooldown 配置值无效: {cooldown_val}，使用默认值 5.0"
+            )
             self._cooldown = 5.0
 
         self._poke_prompt = str(self._cfg("poke_prompt", DEFAULT_POKE_PROMPT))
@@ -93,12 +96,18 @@ class PokeToLLM(Star):
         # 白名单和黑名单（使用 frozenset 提高查找效率，不可变）
         enabled_groups_raw = self._cfg("enabled_groups", [])
         self._enabled_groups: frozenset[str] = frozenset(
-            str(g) for g in (enabled_groups_raw if isinstance(enabled_groups_raw, list) else []) if g
+            str(g)
+            for g in (
+                enabled_groups_raw if isinstance(enabled_groups_raw, list) else []
+            )
+            if g
         )
 
         blacklisted_raw = self._cfg("blacklisted_users", [])
         self._blacklisted_users: frozenset[str] = frozenset(
-            str(u) for u in (blacklisted_raw if isinstance(blacklisted_raw, list) else []) if u
+            str(u)
+            for u in (blacklisted_raw if isinstance(blacklisted_raw, list) else [])
+            if u
         )
 
         # 冷却记录: user_id -> last_poke_time
@@ -128,7 +137,11 @@ class PokeToLLM(Star):
         """清理过期的冷却记录"""
         now = time.time()
         # 使用列表推导避免在迭代时修改字典
-        expired = [uid for uid, ts in self._cooldown_map.items() if now - ts > COOLDOWN_EXPIRE_SECONDS]
+        expired = [
+            uid
+            for uid, ts in self._cooldown_map.items()
+            if now - ts > COOLDOWN_EXPIRE_SECONDS
+        ]
         for uid in expired:
             del self._cooldown_map[uid]
 
@@ -243,6 +256,38 @@ class PokeToLLM(Star):
 
         # 通过标准 LLM 链路请求
         yield event.request_llm(prompt=prompt, conversation=conversation)
+
+    @filter.on_decorating_result(priority=100000)
+    async def suppress_synthetic_poke_quote(self, event: AstrMessageEvent) -> None:
+        """Remove the synthetic notice quote at the final send boundary.
+
+        Args:
+            event: The AstrBot message event being decorated.
+        """
+        if not event.get_extra("_poke_trigger", False) or event.get_extra(
+            "_poke_quote_filter_installed", False
+        ):
+            return
+
+        synthetic_message_id = str(event.message_obj.message_id)
+        if synthetic_message_id.isascii() and synthetic_message_id.isdecimal():
+            return
+
+        original_send = event.send
+
+        async def send_without_synthetic_quote(message_chain) -> None:
+            message_chain.chain = [
+                component
+                for component in message_chain.chain
+                if not (
+                    isinstance(component, Reply)
+                    and str(component.id) == synthetic_message_id
+                )
+            ]
+            await original_send(message_chain)
+
+        event.send = send_without_synthetic_quote
+        event.set_extra("_poke_quote_filter_installed", True)
 
     async def _get_conversation(self, event: AstrMessageEvent) -> Conversation | None:
         """获取当前会话的 conversation 对象"""

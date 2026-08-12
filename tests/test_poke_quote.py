@@ -6,7 +6,7 @@ import types
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "main.py"
@@ -31,7 +31,8 @@ def load_plugin_module():
             return lambda *args, **kwargs: None
 
     class AstrMessageEvent:
-        pass
+        def is_admin(self):
+            return False
 
     class MessageChain:
         pass
@@ -103,6 +104,52 @@ class FakeEvent:
 class FakeMessageChain:
     def __init__(self, chain):
         self.chain = chain
+
+
+class FakePokeEvent:
+    def __init__(self, *, sender_id: str, is_admin: bool):
+        self.message_obj = types.SimpleNamespace(
+            raw_message={
+                "post_type": "notice",
+                "notice_type": "notify",
+                "sub_type": "poke",
+                "self_id": 999,
+                "user_id": int(sender_id),
+                "target_id": 999,
+                "group_id": 123,
+            }
+        )
+        self.unified_msg_origin = "aiocqhttp:GroupMessage:123"
+        self._sender_id = sender_id
+        self._is_admin = is_admin
+        self._extras = {}
+
+    def get_platform_name(self):
+        return "aiocqhttp"
+
+    def get_platform_id(self):
+        return "aiocqhttp"
+
+    def get_self_id(self):
+        return "999"
+
+    def get_sender_id(self):
+        return self._sender_id
+
+    def get_sender_name(self):
+        return "Admin" if self._is_admin else "Member"
+
+    def get_group_id(self):
+        return "123"
+
+    def is_admin(self):
+        return self._is_admin
+
+    def set_extra(self, key, value):
+        self._extras[key] = value
+
+    def request_llm(self, **kwargs):
+        return kwargs
 
 
 class PokeQuoteTests(unittest.IsolatedAsyncioTestCase):
@@ -186,6 +233,88 @@ class CooldownTests(unittest.TestCase):
 
         self.assertIsNone(first)
         self.assertIsNone(second)
+
+    def test_admin_bypasses_existing_user_and_group_cooldowns(self):
+        with patch.object(self.module.time, "monotonic", return_value=100.0):
+            self.assertIsNone(self.plugin._check_cooldown("admin", "group-a"))
+            self.assertIsNone(
+                self.plugin._check_cooldown("admin", "group-a", is_admin=True)
+            )
+
+    def test_admin_does_not_start_cooldowns_for_regular_users(self):
+        with patch.object(self.module.time, "monotonic", side_effect=[101.0]):
+            admin = self.plugin._check_cooldown(
+                "admin",
+                "group-a",
+                is_admin=True,
+            )
+            regular = self.plugin._check_cooldown("user-a", "group-a")
+
+        self.assertIsNone(admin)
+        self.assertIsNone(regular)
+        self.assertNotIn("admin", self.plugin._cooldown_map)
+
+    def test_invalid_cooldowns_fall_back_to_defaults(self):
+        plugin = self.module.PokeToLLM(
+            self.module.Context(),
+            {"cooldown": "nan", "group_cooldown": "inf"},
+        )
+
+        self.assertEqual(plugin._cooldown, 5.0)
+        self.assertEqual(plugin._group_cooldown, 15.0)
+
+
+class PromptTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load_plugin_module()
+        self.plugin = self.module.PokeToLLM(self.module.Context())
+
+    def test_default_prompt_identifies_actor_and_scene(self):
+        prompt = self.plugin._format_prompt("木有知", "1215198344", "215532038")
+
+        self.assertIn("木有知（用户 ID：1215198344）", prompt)
+        self.assertIn("在群聊里戳了你一下", prompt)
+        self.assertIn("不要把其他群友的话误认成对方说的", prompt)
+
+    def test_legacy_custom_prompt_remains_compatible(self):
+        plugin = self.module.PokeToLLM(
+            self.module.Context(),
+            {"poke_prompt": "$username 戳了你，保留 $unknown"},
+        )
+
+        prompt = plugin._format_prompt("Alice", "123", None)
+
+        self.assertEqual(prompt, "Alice 戳了你，保留 $unknown")
+
+
+class PokeHandlerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.module = load_plugin_module()
+        self.plugin = self.module.PokeToLLM(
+            self.module.Context(),
+            {"cooldown": 600.0, "group_cooldown": 600.0},
+        )
+        self.plugin._get_conversation = AsyncMock(return_value=object())
+        self.plugin._group_cooldown_map["aiocqhttp:GroupMessage:123"] = (
+            self.module.time.monotonic()
+        )
+
+    async def test_admin_event_bypasses_group_cooldown_and_requests_llm(self):
+        event = FakePokeEvent(sender_id="1215198344", is_admin=True)
+
+        results = [result async for result in self.plugin.on_poke(event)]
+
+        self.assertEqual(len(results), 1)
+        self.assertIn("Admin（用户 ID：1215198344）", results[0]["prompt"])
+        self.assertTrue(event._extras["_poke_trigger"])
+
+    async def test_regular_event_is_silent_during_group_cooldown(self):
+        event = FakePokeEvent(sender_id="10001", is_admin=False)
+
+        results = [result async for result in self.plugin.on_poke(event)]
+
+        self.assertEqual(results, [])
+        self.plugin._get_conversation.assert_not_awaited()
 
 
 if __name__ == "__main__":

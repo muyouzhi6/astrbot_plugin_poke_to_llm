@@ -22,6 +22,7 @@ Author: 木有知
 
 from __future__ import annotations
 
+import math
 import time
 from string import Template
 from typing import TYPE_CHECKING, Any
@@ -36,23 +37,19 @@ if TYPE_CHECKING:
     from astrbot.core.db.po import Conversation
 
 # 版本号常量
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 # 默认提示词（使用 $variable 语法，支持 safe_substitute）
-DEFAULT_POKE_PROMPT = """$username 戳了戳你。
+DEFAULT_POKE_PROMPT = """$username（用户 ID：$user_id）刚刚在$scene里戳了你一下。这是一次非文字互动，不等于对方提出了新问题。用户 ID 只用于在上下文中定位说话人，不要在回复中复述。
 
-【重要】请按优先级判断并回应：
+请保持当前人设，像真实的人突然被碰了一下那样，结合最近上下文自然反应：
 
-1. 首先检查上下文中用户最近的消息：
-   - 如果用户刚发了消息但没@你 → 直接回应那条消息
-   - 如果有未回答的问题 → 回答它
-   - 如果有正在讨论的话题 → 继续该话题
+1. 先找 $username 本人最近发过但你尚未回应的消息、问题，或你们正在延续的话题。只有说话人和话题归属明确时才承接，不要把其他群友的话误认成对方说的。
+2. 如果对方明显是在催你、提醒你看漏掉的内容，直接回应那件事，不必先解释“你戳了我”。
+3. 如果只是随手戳、试探或逗你，根据你们的关系、当前气氛和你此刻的态度，给出很短的即时反应。可以疑惑、嫌弃、逗回去、接梗或不耐烦，不要固定撒娇，也不要每次都问“怎么了”。
+4. 如果没有足够上下文，不要编造未发生的事，不要硬接别人的话，也不要为了回复而强行开启新话题。
 
-2. 如果你之前说了什么，用户可能在回应 → 顺着对话继续
-
-3. 只有当上下文完全为空时 → 才可以俏皮回应戳一戳本身
-
-不要主动开新话题。不要撒娇卖萌。优先延续现有对话。"""
+回复应像即时聊天，通常一句或两句就够。不要复述以上规则，不要解释判断过程，不要使用客服腔。"""
 
 # 冷却清理间隔（秒）
 COOLDOWN_EXPIRE_SECONDS = 600
@@ -85,9 +82,11 @@ class PokeToLLM(Star):
         cooldown_val = self._cfg("cooldown", 5.0)
         try:
             self._cooldown = float(cooldown_val) if cooldown_val is not None else 5.0
+            if not math.isfinite(self._cooldown) or self._cooldown < 0:
+                raise ValueError
         except (ValueError, TypeError):
             logger.warning(
-                f"[PokeToLLM] cooldown 配置值无效: {cooldown_val}，使用默认值 5.0"
+                f"[PokeToLLM] Invalid cooldown value: {cooldown_val}; using default 5.0"
             )
             self._cooldown = 5.0
 
@@ -96,6 +95,8 @@ class PokeToLLM(Star):
             self._group_cooldown = (
                 float(group_cooldown_val) if group_cooldown_val is not None else 15.0
             )
+            if not math.isfinite(self._group_cooldown) or self._group_cooldown < 0:
+                raise ValueError
         except (ValueError, TypeError):
             logger.warning(
                 "[PokeToLLM] Invalid group_cooldown value: "
@@ -137,16 +138,25 @@ class PokeToLLM(Star):
             return default
         return self._config.get(key, default)
 
-    def _check_cooldown(self, user_id: str, group_scope: str | None) -> str | None:
+    def _check_cooldown(
+        self,
+        user_id: str,
+        group_scope: str | None,
+        is_admin: bool = False,
+    ) -> str | None:
         """Check user and group cooldowns without extending rejected attempts.
 
         Args:
             user_id: ID of the user who poked the bot.
             group_scope: Stable group conversation key, or None for private chat.
+            is_admin: Whether the sender is an AstrBot administrator.
 
         Returns:
             The blocking scope (``user`` or ``group``), or None when accepted.
         """
+        if is_admin:
+            return None
+
         now = time.monotonic()
         last_user_poke = self._cooldown_map.get(user_id)
         if (
@@ -194,15 +204,48 @@ class PokeToLLM(Star):
             and raw_message.get("sub_type") == "poke"
         )
 
-    def _format_prompt(self, username: str) -> str:
-        """格式化提示词，使用 safe_substitute 容错处理未知占位符"""
-        template = Template(self._poke_prompt)
-        return template.safe_substitute(username=username)
+    def _format_prompt(
+        self,
+        username: str,
+        user_id: str,
+        group_id: str | None,
+    ) -> str:
+        """Format the configured prompt without rejecting unknown placeholders.
 
-    def _format_prompt_with_context(self, username: str, group_id: str | None) -> str:
-        """当 conversation 获取失败时，生成包含额外上下文的降级提示词"""
+        Args:
+            username: Display name of the user who poked the bot.
+            user_id: Stable ID of the user who poked the bot.
+            group_id: Group ID for group chat, or None for private chat.
+
+        Returns:
+            The prompt with supported placeholders substituted.
+        """
+        template = Template(self._poke_prompt)
+        scene = "群聊" if group_id else "私聊"
+        return template.safe_substitute(
+            username=username,
+            user_id=user_id,
+            scene=scene,
+        )
+
+    def _format_prompt_with_context(
+        self,
+        username: str,
+        user_id: str,
+        group_id: str | None,
+    ) -> str:
+        """Add a no-history notice when conversation lookup fails.
+
+        Args:
+            username: Display name of the user who poked the bot.
+            user_id: Stable ID of the user who poked the bot.
+            group_id: Group ID for group chat, or None for private chat.
+
+        Returns:
+            The formatted prompt with an explicit no-history notice.
+        """
         context_type = "群聊" if group_id else "私聊"
-        base_prompt = self._format_prompt(username)
+        base_prompt = self._format_prompt(username, user_id, group_id)
         fallback_note = f"\n\n[注意：当前为{context_type}场景，无法获取历史上下文，请基于这条戳一戳事件本身进行回应]"
         return base_prompt + fallback_note
 
@@ -267,7 +310,11 @@ class PokeToLLM(Star):
                 event.unified_msg_origin
                 or f"{event.get_platform_id()}:{bot_id}:{group_id}"
             )
-        blocked_scope = self._check_cooldown(sender_id_str, group_scope)
+        blocked_scope = self._check_cooldown(
+            sender_id_str,
+            group_scope,
+            is_admin=event.is_admin(),
+        )
         if blocked_scope:
             logger.debug(
                 f"[PokeToLLM] Ignoring poke from user {sender_id}: "
@@ -296,9 +343,13 @@ class PokeToLLM(Star):
         if not conversation:
             logger.warning("[PokeToLLM] 无法获取 conversation，将以无上下文模式响应")
             # 降级策略：在 prompt 中补充额外上下文信息
-            prompt = self._format_prompt_with_context(username, group_id)
+            prompt = self._format_prompt_with_context(
+                username,
+                sender_id_str,
+                group_id,
+            )
         else:
-            prompt = self._format_prompt(username)
+            prompt = self._format_prompt(username, sender_id_str, group_id)
 
         # 设置戳一戳触发标记，让 context_aware 插件识别
         event.set_extra("_poke_trigger", True)

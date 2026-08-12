@@ -26,10 +26,16 @@
     "default": true
   },
   "cooldown": {
-    "description": "冷却时间（秒）",
+    "description": "个人冷却时间（秒）",
     "type": "float",
     "hint": "同一用户连续戳一戳的最小间隔时间，防止刷屏",
     "default": 5.0
+  },
+  "group_cooldown": {
+    "description": "群聊全局冷却时间（秒）",
+    "type": "float",
+    "hint": "同一群内任意用户两次有效戳一戳的最小间隔，防止多人轮流触发；设为 0 可关闭",
+    "default": 15.0
   },
   "blacklisted_users": {
     "description": "用户黑名单",

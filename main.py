@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from astrbot.core.db.po import Conversation
 
 # 版本号常量
-VERSION = "2.2.1"
+VERSION = "2.3.0"
 
 # 默认提示词（使用 $variable 语法，支持 safe_substitute）
 DEFAULT_POKE_PROMPT = """$username 戳了戳你。
@@ -91,6 +91,18 @@ class PokeToLLM(Star):
             )
             self._cooldown = 5.0
 
+        group_cooldown_val = self._cfg("group_cooldown", 15.0)
+        try:
+            self._group_cooldown = (
+                float(group_cooldown_val) if group_cooldown_val is not None else 15.0
+            )
+        except (ValueError, TypeError):
+            logger.warning(
+                "[PokeToLLM] Invalid group_cooldown value: "
+                f"{group_cooldown_val}; using default 15.0"
+            )
+            self._group_cooldown = 15.0
+
         self._poke_prompt = str(self._cfg("poke_prompt", DEFAULT_POKE_PROMPT))
 
         # 白名单和黑名单（使用 frozenset 提高查找效率，不可变）
@@ -110,8 +122,9 @@ class PokeToLLM(Star):
             if u
         )
 
-        # 冷却记录: user_id -> last_poke_time
+        # Accepted pokes start both cooldowns; rejected pokes never extend them.
         self._cooldown_map: dict[str, float] = {}
+        self._group_cooldown_map: dict[str, float] = {}
 
         # 统计
         self._poke_count = 0
@@ -124,26 +137,54 @@ class PokeToLLM(Star):
             return default
         return self._config.get(key, default)
 
-    def _check_cooldown(self, user_id: str) -> bool:
-        """检查冷却时间，返回 True 表示可以响应"""
-        now = time.time()
-        last_time = self._cooldown_map.get(user_id, 0.0)
-        if now - last_time < self._cooldown:
-            return False
-        self._cooldown_map[user_id] = now
-        return True
+    def _check_cooldown(self, user_id: str, group_scope: str | None) -> str | None:
+        """Check user and group cooldowns without extending rejected attempts.
+
+        Args:
+            user_id: ID of the user who poked the bot.
+            group_scope: Stable group conversation key, or None for private chat.
+
+        Returns:
+            The blocking scope (``user`` or ``group``), or None when accepted.
+        """
+        now = time.monotonic()
+        last_user_poke = self._cooldown_map.get(user_id)
+        if (
+            self._cooldown > 0
+            and last_user_poke is not None
+            and now - last_user_poke < self._cooldown
+        ):
+            return "user"
+
+        last_group_poke = self._group_cooldown_map.get(group_scope)
+        if (
+            group_scope
+            and self._group_cooldown > 0
+            and last_group_poke is not None
+            and now - last_group_poke < self._group_cooldown
+        ):
+            return "group"
+
+        if self._cooldown > 0:
+            self._cooldown_map[user_id] = now
+        if group_scope and self._group_cooldown > 0:
+            self._group_cooldown_map[group_scope] = now
+        return None
 
     def _cleanup_cooldown(self) -> None:
         """清理过期的冷却记录"""
-        now = time.time()
-        # 使用列表推导避免在迭代时修改字典
-        expired = [
-            uid
-            for uid, ts in self._cooldown_map.items()
-            if now - ts > COOLDOWN_EXPIRE_SECONDS
-        ]
-        for uid in expired:
-            del self._cooldown_map[uid]
+        now = time.monotonic()
+        expire_after = max(
+            COOLDOWN_EXPIRE_SECONDS,
+            self._cooldown,
+            self._group_cooldown,
+        )
+        for cooldown_map in (self._cooldown_map, self._group_cooldown_map):
+            expired = [
+                key for key, ts in cooldown_map.items() if now - ts > expire_after
+            ]
+            for key in expired:
+                del cooldown_map[key]
 
     def _is_poke_event(self, raw_message: dict[str, Any]) -> bool:
         """检查是否为戳一戳事件"""
@@ -219,9 +260,19 @@ class PokeToLLM(Star):
         elif not self._enable_in_private:
             return
 
-        # 冷却检查
-        if not self._check_cooldown(sender_id_str):
-            logger.debug(f"[PokeToLLM] 用户 {sender_id} 冷却中，忽略")
+        # Group events pass both limits so rotating users cannot bypass throttling.
+        group_scope = None
+        if group_id:
+            group_scope = str(
+                event.unified_msg_origin
+                or f"{event.get_platform_id()}:{bot_id}:{group_id}"
+            )
+        blocked_scope = self._check_cooldown(sender_id_str, group_scope)
+        if blocked_scope:
+            logger.debug(
+                f"[PokeToLLM] Ignoring poke from user {sender_id}: "
+                f"{blocked_scope} cooldown is active"
+            )
             return
 
         # ===== 通过所有检查，处理戳一戳 =====
@@ -311,5 +362,6 @@ class PokeToLLM(Star):
         logger.info(
             f"[PokeToLLM] 插件已终止 | "
             f"共响应 {self._poke_count} 次戳一戳 | "
-            f"冷却记录: {len(self._cooldown_map)} 条"
+            f"用户冷却记录: {len(self._cooldown_map)} 条 | "
+            f"群聊冷却记录: {len(self._group_cooldown_map)} 条"
         )

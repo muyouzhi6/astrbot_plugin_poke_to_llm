@@ -6,6 +6,7 @@ import types
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "main.py"
@@ -138,6 +139,53 @@ class PokeQuoteTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.suppress_synthetic_poke_quote(event)
 
         self.assertEqual(event.send, original_send)
+
+
+class CooldownTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load_plugin_module()
+        self.plugin = self.module.PokeToLLM(
+            self.module.Context(),
+            {"cooldown": 5.0, "group_cooldown": 15.0},
+        )
+
+    def test_different_users_in_same_group_share_cooldown(self):
+        with patch.object(self.module.time, "monotonic", side_effect=[100.0, 106.0]):
+            first = self.plugin._check_cooldown("user-a", "group-a")
+            second = self.plugin._check_cooldown("user-b", "group-a")
+
+        self.assertIsNone(first)
+        self.assertEqual(second, "group")
+
+    def test_group_cooldown_does_not_cross_groups(self):
+        with patch.object(self.module.time, "monotonic", side_effect=[100.0, 101.0]):
+            first = self.plugin._check_cooldown("user-a", "group-a")
+            second = self.plugin._check_cooldown("user-b", "group-b")
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+
+    def test_rejected_poke_does_not_extend_group_cooldown(self):
+        with patch.object(
+            self.module.time,
+            "monotonic",
+            side_effect=[100.0, 110.0, 116.0],
+        ):
+            first = self.plugin._check_cooldown("user-a", "group-a")
+            rejected = self.plugin._check_cooldown("user-b", "group-a")
+            after_original_window = self.plugin._check_cooldown("user-b", "group-a")
+
+        self.assertIsNone(first)
+        self.assertEqual(rejected, "group")
+        self.assertIsNone(after_original_window)
+
+    def test_private_chat_only_uses_user_cooldown(self):
+        with patch.object(self.module.time, "monotonic", side_effect=[100.0, 101.0]):
+            first = self.plugin._check_cooldown("user-a", None)
+            second = self.plugin._check_cooldown("user-b", None)
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
 
 
 if __name__ == "__main__":

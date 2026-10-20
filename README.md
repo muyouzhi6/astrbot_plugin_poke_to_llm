@@ -126,9 +126,9 @@ context_aware 插件 v2.5.0+ 会识别这些标记，生成正确的场景描述
 
 
 
-本插件开发QQ群：215532038
+本插件开发QQ群：木有知插件群 1105763429
 
-<img width="1284" height="2289" alt="qrcode_1767584668806" src="https://github.com/user-attachments/assets/113ccf60-044a-47f3-ac8f-432ae05f89ee" />
+<img width="1284" height="2283" alt="木有知插件群二维码" src="assets/plugin_group_qr.jpg" />
 
   
 **🌟 如果这个插件对你有帮助，请给个 Star 支持一下！**
